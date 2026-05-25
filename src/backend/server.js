@@ -121,7 +121,4 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', database: 'connected', port: PORT });
 });
 
-// Initialize database
-db.initDB().catch(console.error);
-
 module.exports = app;
