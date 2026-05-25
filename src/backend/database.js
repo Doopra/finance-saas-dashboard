@@ -43,6 +43,28 @@ function getClient() {
 
 /**
  * =========================
+ * BIGINT SANITIZER
+ * Turso / libSQL returns INTEGER columns as BigInt.
+ * JSON.stringify cannot serialize BigInt, so we convert
+ * every BigInt value to a plain Number throughout all rows.
+ * =========================
+ */
+function sanitizeRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  const clean = {};
+  for (const [key, value] of Object.entries(row)) {
+    clean[key] = typeof value === 'bigint' ? Number(value) : value;
+  }
+  return clean;
+}
+
+function sanitizeRows(rows) {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map(sanitizeRow);
+}
+
+/**
+ * =========================
  * INIT GUARD (IMPORTANT FIX)
  * Prevents race conditions in Next.js / serverless
  * =========================
@@ -139,8 +161,7 @@ async function initDB() {
 async function query(sql, params = []) {
   await initDB();
   const res = await getClient().execute(sql, params);
-  // res.rows is an array of objects
-  return res.rows;
+  return sanitizeRows(res.rows);
 }
 
 async function get(sql, params = []) {
@@ -151,12 +172,14 @@ async function get(sql, params = []) {
 
 async function run(sql, params = []) {
   await initDB();
-  // For INSERT statements we want the last inserted row id
   const isInsert = /^\s*INSERT/i.test(sql);
   const result = await getClient().execute(sql, params);
   if (isInsert) {
-    // Turso returns lastInsertRowid() via result.lastInsertRowid
-    return { id: result.lastInsertRowid || null, changes: result.changes };
+    // Turso returns lastInsertRowid as BigInt — convert to Number
+    const id = typeof result.lastInsertRowid === 'bigint'
+      ? Number(result.lastInsertRowid)
+      : (result.lastInsertRowid || null);
+    return { id, changes: result.changes };
   }
   return { changes: result.changes };
 }
