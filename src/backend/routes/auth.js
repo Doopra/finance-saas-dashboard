@@ -32,12 +32,12 @@ router.post('/register', async (req, res) => {
       [name, email.toLowerCase(), passwordHash]
     );
 
-    const userId = result.id;
+    const userId = Number(result.id);
 
     // Seed default settings and some mock transactions for immediate wow factor!
     // We will do seeding upon registration for a custom demo user if they registers as "demo@finance.com" or similar!
     // But even standard registration gets a JWT token instantly.
-    const token = jwt.sign({ userId, email: email.toLowerCase() }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId: Number(userId), email: email.toLowerCase() }, JWT_SECRET, { expiresIn: '7d' });
 
     res.status(201).json({
       token,
