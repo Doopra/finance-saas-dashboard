@@ -1,165 +1,213 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs');
+'use strict';
 
-// Ensure data folder exists
-const dataDir = process.env.NODE_ENV === 'production' ? '/tmp' : path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+const { Pool } = require('pg');
 
-const dbPath = path.join(dataDir, 'finance.db');
-const db = new sqlite3.Database(dbPath);
-
-// Promised-based database helpers
-const query = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-};
-
-const get = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
-    });
-  });
-};
-
-const run = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve({ id: this.lastID, changes: this.changes });
-    });
-  });
-};
-
-// Initialize Tables
-const initDB = async () => {
-  // Users Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      currency TEXT DEFAULT 'NGN',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      settings TEXT DEFAULT '{}'
-    )
-  `);
-
-  // Statements Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS statements (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      filename TEXT NOT NULL,
-      file_type TEXT NOT NULL,
-      status TEXT DEFAULT 'processing',
-      upload_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Transactions Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      statement_id INTEGER,
-      user_id INTEGER NOT NULL,
-      date TEXT NOT NULL,
-      description TEXT NOT NULL,
-      amount REAL NOT NULL,
-      type TEXT NOT NULL, -- 'debit' or 'credit'
-      category TEXT NOT NULL, -- 'Product Purchases', 'Sales Income', 'Miscellaneous Expenses'
-      original_category TEXT,
-      bank_name TEXT DEFAULT 'Unknown Bank',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (statement_id) REFERENCES statements(id) ON DELETE SET NULL
-    )
-  `);
-
-  // Category Rules Table (for auto-learning descriptions)
-  await run(`
-    CREATE TABLE IF NOT EXISTS category_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      pattern TEXT NOT NULL,
-      category TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      UNIQUE(user_id, pattern)
-    )
-  `);
-
-  // AI Insight Cache Table
-  await run(`
-    CREATE TABLE IF NOT EXISTS ai_insight_cache (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      insight_type TEXT NOT NULL, -- 'summary', 'forecast', 'anomalies'
-      content TEXT NOT NULL,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Seed default category rules if empty
-  const rules = await query('SELECT count(*) as count FROM category_rules');
-  if (rules[0].count === 0) {
-    const defaultRules = [
-      // Product Purchases keywords
-      { user_id: 1, pattern: 'product', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'supplier', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'wholesale', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'stock', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'inventory', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'purchase', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'ltd', category: 'Product Purchases' },
-      { user_id: 1, pattern: 'manufacturer', category: 'Product Purchases' },
-      
-      // Sales Income keywords
-      { user_id: 1, pattern: 'sales', category: 'Sales Income' },
-      { user_id: 1, pattern: 'invoice', category: 'Sales Income' },
-      { user_id: 1, pattern: 'payment from', category: 'Sales Income' },
-      { user_id: 1, pattern: 'credit alert', category: 'Sales Income' },
-      { user_id: 1, pattern: 'deposit', category: 'Sales Income' },
-      { user_id: 1, pattern: 'revenue', category: 'Sales Income' },
-      { user_id: 1, pattern: 'pos deposit', category: 'Sales Income' },
-      
-      // Miscellaneous Expenses keywords
-      { user_id: 1, pattern: 'transfer', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'pos terminal', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'airtime', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'charges', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'commission', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'fee', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'cash withdrawal', category: 'Miscellaneous Expenses' },
-      { user_id: 1, pattern: 'personal', category: 'Miscellaneous Expenses' }
-    ];
-
-    for (const rule of defaultRules) {
-      await run(
-        'INSERT OR IGNORE INTO category_rules (user_id, pattern, category) VALUES (?, ?, ?)',
-        [rule.user_id, rule.pattern, rule.category]
-      );
-    }
+/**
+ * =========================
+ * CONFIG
+ * =========================
+ */
+function getPgConfig() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is missing');
   }
 
-  console.log('Database initialized successfully.');
-};
+  return {
+    connectionString: process.env.DATABASE_URL,
+    ssl:
+      process.env.NODE_ENV === 'production'
+        ? { rejectUnauthorized: false }
+        : false,
+  };
+}
+
+/**
+ * =========================
+ * POOL SINGLETON
+ * =========================
+ */
+let pool;
+
+function getPool() {
+  if (!pool) {
+    pool = new Pool(getPgConfig());
+
+    pool.on('connect', () => {
+      console.log('[DB] Connected');
+    });
+
+    pool.on('error', (err) => {
+      console.error('[DB ERROR]', err);
+    });
+  }
+
+  return pool;
+}
+
+/**
+ * =========================
+ * INIT GUARD (IMPORTANT FIX)
+ * Prevents race conditions in Next.js / serverless
+ * =========================
+ */
+let initPromise = null;
+
+/**
+ * =========================
+ * PLACEHOLDER CONVERTER
+ * =========================
+ */
+function convertPlaceholders(sql) {
+  let i = 1;
+  return sql.replace(/\?/g, () => `$${i++}`);
+}
+
+/**
+ * =========================
+ * INIT DATABASE (SAFE)
+ * =========================
+ */
+async function initDB() {
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    const db = getPool();
+
+    console.log('[DB] Initializing schema...');
+
+    // Test connection
+    await db.query('SELECT 1');
+
+    /**
+     * USERS
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        currency TEXT DEFAULT 'NGN',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        settings TEXT DEFAULT '{}'
+      )
+    `);
+
+    /**
+     * STATEMENTS
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS statements (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        filename TEXT NOT NULL,
+        file_type TEXT NOT NULL,
+        status TEXT DEFAULT 'processing',
+        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    /**
+     * TRANSACTIONS
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+        id SERIAL PRIMARY KEY,
+        statement_id INTEGER REFERENCES statements(id) ON DELETE SET NULL,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount REAL NOT NULL,
+        type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        original_category TEXT,
+        bank_name TEXT DEFAULT 'Unknown Bank',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    /**
+     * CATEGORY RULES
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS category_rules (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        pattern TEXT NOT NULL,
+        category TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    /**
+     * AI CACHE
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ai_insight_cache (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        insight_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('[DB] Schema ready');
+  })();
+
+  return initPromise;
+}
+
+/**
+ * =========================
+ * QUERY HELPERS (AUTO INIT FIX)
+ * =========================
+ */
+async function query(sql, params = []) {
+  await initDB(); // 🔥 CRITICAL FIX
+
+  const res = await getPool().query(
+    convertPlaceholders(sql),
+    params
+  );
+
+  return res.rows;
+}
+
+async function get(sql, params = []) {
+  await initDB(); // 🔥 CRITICAL FIX
+
+  const res = await getPool().query(
+    convertPlaceholders(sql),
+    params
+  );
+
+  return res.rows[0] || null;
+}
+
+async function run(sql, params = []) {
+  await initDB(); // 🔥 CRITICAL FIX
+
+  let pgSql = convertPlaceholders(sql);
+
+  const isInsert = /^\s*INSERT/i.test(pgSql);
+
+  if (isInsert && !pgSql.includes('RETURNING')) {
+    pgSql += ' RETURNING id';
+  }
+
+  const res = await getPool().query(pgSql, params);
+
+  return {
+    id: res.rows?.[0]?.id || null,
+    changes: res.rowCount,
+  };
+}
 
 module.exports = {
-  db,
+  initDB,
   query,
   get,
   run,
-  initDB
+  getPool,
 };
