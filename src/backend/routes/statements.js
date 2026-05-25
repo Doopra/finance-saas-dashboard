@@ -15,7 +15,14 @@ if (typeof global.Path2D === 'undefined') {
   global.Path2D = class Path2D {};
 }
 
-const pdfParse = require('pdf-parse');
+let pdfParseFunc = null;
+// Lazy‑load pdf‑parse and cache the parser function
+const getPdfParseFunc = async () => {
+  if (pdfParseFunc) return pdfParseFunc;
+  const mod = await import('pdf-parse');
+  pdfParseFunc = mod.PDFParse || (mod.default && mod.default.PDFParse) || mod.default || mod;
+  return pdfParseFunc;
+};
 const xlsx = require('xlsx');
 const Tesseract = require('tesseract.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -38,6 +45,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit for large files
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (['.pdf', '.csv', '.xlsx', '.xls', '.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
@@ -45,6 +53,21 @@ const upload = multer({
     } else {
       cb(new Error('Unsupported file type. Only PDF, CSV, Excel, or Images are allowed.'));
     }
+  }
+});
+
+// DELETE endpoint to remove a statement and its related transactions
+router.delete('/delete/:id', authMiddleware, async (req, res) => {
+  const statementId = req.params.id;
+  try {
+    // Delete related transactions first to maintain foreign key constraints
+    await db.run('DELETE FROM transactions WHERE statement_id = ?', [statementId]);
+    // Delete the statement record
+    await db.run('DELETE FROM statements WHERE id = ? AND user_id = ?', [statementId, req.userId]);
+    res.json({ message: `Statement ${statementId} and its transactions have been deleted.` });
+  } catch (err) {
+    console.error('Delete statement error:', err);
+    res.status(500).json({ error: 'Failed to delete statement.' });
   }
 });
 
@@ -81,10 +104,8 @@ const parseTextTransactions = (text) => {
   const lines = text.split('\n');
   const transactions = [];
   
-  // Date patterns: DD/MM/YYYY, YYYY-MM-DD, DD-MMM-YYYY, etc.
-  const dateRegex = /\b(\d{1,2})[-/](\d{1,2}|\w{3})[-/](\d{2,4})\b|\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/;
-  // Currency/Amount patterns: ₦1,234.56, 12,345.00, etc.
-  const amountRegex = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b/;
+  // Date patterns: DD/MM/YYYY, YYYY-MM-DD, DD-MMM-YYYY, DD MMM YYYY, etc.
+  const dateRegex = /\b(\d{1,2})[-/\s.,](\d{1,2}|\w{3,9})[-/\s.,](\d{2,4})\b|\b(\d{4})[-/\s.,](\d{1,2}|\w{3,9})[-/\s.,](\d{1,2})\b/;
 
   lines.forEach(line => {
     const cleanLine = line.trim();
@@ -100,13 +121,23 @@ const parseTextTransactions = (text) => {
     let remaining = cleanLine.replace(dateStr, '').trim();
     
     // Find numeric values in the line (typically amount, balance)
-    const numbers = remaining.match(/\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b/g) || [];
+    // We look for numbers with a decimal point to be confident it's an amount
+    const numberRegex = /\b\d{1,3}(?:,\d{3})*(?:\.\d{2,})\b|\b\d+(?:\.\d{2,})\b/g;
+    const numbers = remaining.match(numberRegex) || [];
     
     if (numbers.length === 0) return;
     
-    // The first number is typically the transaction amount
-    const amountVal = parseFloat(numbers[0].replace(/,/g, ''));
-    if (isNaN(amountVal) || amountVal === 0) return;
+    // The first non-zero number is typically the transaction amount
+    let amountVal = 0;
+    for (const num of numbers) {
+      const val = parseFloat(num.replace(/,/g, ''));
+      if (val > 0) {
+        amountVal = val;
+        break;
+      }
+    }
+    
+    if (amountVal === 0) return;
 
     // Remove numbers and currency symbols from remaining string to get description
     let description = remaining;
@@ -124,9 +155,11 @@ const parseTextTransactions = (text) => {
     }
 
     // Determine credit or debit
-    const isCredit = cleanLine.toLowerCase().includes('cr') || 
-                     cleanLine.toLowerCase().includes('credit') || 
-                     cleanLine.toLowerCase().includes('inflow') ||
+    const lowerLine = cleanLine.toLowerCase();
+    const isCredit = lowerLine.includes('cr') || 
+                     lowerLine.includes('credit') || 
+                     lowerLine.includes('inflow') ||
+                     lowerLine.includes('deposit') ||
                      cleanLine.includes('+');
 
     const type = isCredit ? 'credit' : 'debit';
@@ -142,17 +175,34 @@ const parseTextTransactions = (text) => {
   return transactions;
 };
 
-// Utility to normalize date strings
+// Utility to normalize date strings (handles Excel serial numbers, ISO strings, DD/MM/YYYY etc.)
 const formatParsedDate = (dateStr) => {
   try {
-    const clean = dateStr.replace(/[-/]/g, ' ');
-    const parts = clean.split(/\s+/);
+    // Handle Excel serial number dates (returned by xlsx for date cells)
+    const asNum = Number(dateStr);
+    if (!isNaN(asNum) && asNum > 1000 && asNum < 100000) {
+      // Excel date serial: days since 1900-01-01 (with the 1900 leap year bug offset)
+      const excelEpoch = new Date(1899, 11, 30);
+      const d = new Date(excelEpoch.getTime() + asNum * 86400000);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+
+    const s = String(dateStr).trim();
+
+    // Already in YYYY-MM-DD format
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    const clean = s.replace(/[-/.,]/g, ' ');
+    const parts = clean.trim().split(/\s+/);
     if (parts.length === 3) {
-      // If it starts with a year: YYYY MM DD -> YYYY-MM-DD
+      // YYYY MM DD
       if (parts[0].length === 4) {
         return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
       }
-      // If it ends with a year: DD MM YYYY -> YYYY-MM-DD
+      // DD MM YYYY or DD MMM YYYY
       const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
       const month = isNaN(parts[1]) ? getMonthNumber(parts[1]) : parts[1];
       return `${year}-${month.toString().padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
@@ -253,71 +303,68 @@ router.post('/upload', authMiddleware, upload.single('statement'), async (req, r
     }
     
     // --- 2. PDF TEXT EXTRACTION ---
-    else if (fileType === 'pdf') {
+    if (fileType === 'pdf') {
       const dataBuffer = fs.readFileSync(filePath);
-      
-      // Many Nigerian bank statement PDFs are password-protected
-      // Common passwords: empty string, account number, DOB, phone number
-      // We try multiple strategies before falling back to OCR
+      // Initialize variables for PDF parsing
+      // rawText already defined
       let pdfParsed = false;
-      
-      // Strategy 1: Try without password (unprotected PDF)
+      let e1 = null, e2 = null, e3 = null;
+      const commonPasswords = ['1234', '0000', '123456', 'password', '1111'];
+      const uint8Buffer = new Uint8Array(dataBuffer);
+      // PDF parsing strategies wrapped to catch unexpected errors
       try {
-        const parsedPdf = await pdfParse(dataBuffer);
-        rawText = parsedPdf.text;
-        pdfParsed = true;
-      } catch (e1) {
-        console.log('PDF parse without password failed:', e1.message);
-      }
-      
-      // Strategy 2: Try with empty password (common for bank PDFs)
-      if (!pdfParsed) {
+        const PDFParseClass = await getPdfParseFunc();
+        // Strategy 1: Try without password (unprotected PDF)
         try {
-          const parsedPdf = await pdfParse(dataBuffer, { password: '' });
+          const parser = new PDFParseClass(uint8Buffer);
+          const parsedPdf = await parser.getText();
           rawText = parsedPdf.text;
           pdfParsed = true;
-        } catch (e2) {
-          console.log('PDF parse with empty password failed:', e2.message);
-        }
-      }
-      
-      // Strategy 3: Try with common bank password patterns
-      if (!pdfParsed) {
-        const commonPasswords = ['1234', '0000', '123456', 'password', '1111'];
-        for (const pwd of commonPasswords) {
+        } catch (err) { e1 = err; console.log('PDF parse without password failed:', err.message); }
+        // Strategy 2: Try with empty password
+        if (!pdfParsed) {
           try {
-            const parsedPdf = await pdfParse(dataBuffer, { password: pwd });
+            const parser = new PDFParseClass({ data: uint8Buffer, password: '' });
+            const parsedPdf = await parser.getText();
             rawText = parsedPdf.text;
             pdfParsed = true;
-            console.log(`PDF unlocked with common password pattern.`);
-            break;
-          } catch (ep) {
-            // Continue trying
+          } catch (err) { e2 = err; console.log('PDF parse with empty password failed:', err.message); }
+        }
+        // Strategy 3: Try common passwords
+        if (!pdfParsed) {
+          for (const pwd of commonPasswords) {
+            try {
+              const parser = new PDFParseClass({ data: uint8Buffer, password: pwd });
+              const parsedPdf = await parser.getText();
+              rawText = parsedPdf.text;
+              pdfParsed = true;
+              console.log(`PDF unlocked with common password pattern.`);
+              break;
+            } catch (err) { e3 = err; }
           }
         }
+      } catch (outerErr) {
+        console.error('Unexpected PDF parsing error:', outerErr);
       }
       
-      // Strategy 4: If still locked, try OCR on the PDF as an image-like fallback
+      // After all parsing attempts, determine why we failed
       if (!pdfParsed) {
-        console.log('PDF is password-protected. Attempting Tesseract OCR fallback...');
-        try {
-          // Convert PDF to image-like text extraction via OCR
-          const ocrResult = await Tesseract.recognize(filePath, 'eng', {
-            logger: m => console.log('PDF OCR fallback:', m.status, `${Math.round(m.progress * 100)}%`)
-          });
-          rawText = ocrResult.data.text;
-          pdfParsed = true;
-          console.log('PDF OCR fallback extracted text successfully.');
-        } catch (ocrErr) {
-          console.error('PDF OCR fallback also failed:', ocrErr.message);
-          // Return a user-friendly error message
+        const passwordError = (e1 && e1.message && e1.message.toLowerCase().includes('password')) ||
+                              (e2 && e2.message && e2.message.toLowerCase().includes('password')) ||
+                              (e3 && commonPasswords.some(p => e3.message && e3.message.toLowerCase().includes(p)));
+        if (passwordError) {
+          console.error('PDF is password-protected. Rejecting upload.');
           await db.run('UPDATE statements SET status = ? WHERE id = ?', ['failed', statementId]);
-          
-          // Cleanup file
           try { fs.unlinkSync(filePath); } catch (e) {}
-          
-          return res.status(400).json({ 
-            error: 'This PDF is password-protected and we could not unlock it automatically. Please try: (1) removing the password using your bank app, (2) downloading an unprotected version, or (3) exporting your statement as CSV/Excel instead.' 
+          return res.status(400).json({
+            error: 'The file appears to be encrypted or password-protected. Please ensure it is not password-protected and try uploading again.'
+          });
+        } else {
+          console.error('PDF could not be parsed for unknown reasons.');
+          await db.run('UPDATE statements SET status = ? WHERE id = ?', ['failed', statementId]);
+          try { fs.unlinkSync(filePath); } catch (e) {}
+          return res.status(400).json({
+            error: 'File appears valid but could not be fully parsed after all attempts. PDF structure not supported by primary parser.'
           });
         }
       }
@@ -327,7 +374,7 @@ router.post('/upload', authMiddleware, upload.single('statement'), async (req, r
         // If Gemini Key is present, use LLM for beautiful structured extraction
         if (userGeminiKey) {
           try {
-            extractedTransactions = await extractTransactionsWithGemini(rawText, userGeminiKey);
+            extractedTransactions = await extractTransactionsWithGemini({ rawText }, userGeminiKey);
           } catch (e) {
             console.error('Gemini extraction failed, using fallback regex:', e);
             extractedTransactions = parseTextTransactions(rawText);
@@ -336,22 +383,39 @@ router.post('/upload', authMiddleware, upload.single('statement'), async (req, r
           extractedTransactions = parseTextTransactions(rawText);
         }
       } else {
-        console.log('PDF text extraction yielded minimal text. Using fallback regex on raw content.');
-        extractedTransactions = parseTextTransactions(rawText || '');
+        console.log('No extractable text found. Trying OCR processing...');
+        if (userGeminiKey) {
+          try {
+            extractedTransactions = await extractTransactionsWithGemini({ fileBuffer: dataBuffer, mimeType: 'application/pdf' }, userGeminiKey);
+          } catch (e) {
+            console.error('Gemini OCR extraction failed:', e);
+          }
+        } else {
+          console.error('No text found in PDF, and Gemini key missing for OCR fallback.');
+        }
+      }
+
+      if (!extractedTransactions || extractedTransactions.length === 0) {
+        console.error('Failed to extract any transactions from the PDF.');
+        await db.run('UPDATE statements SET status = ? WHERE id = ?', ['failed', statementId]);
+        try { fs.unlinkSync(filePath); } catch (e) {}
+        return res.status(400).json({
+          error: 'File appears valid but could not be fully parsed after all attempts. No extractable transactions found. If this is a scanned PDF, please provide a Gemini API key or use CSV/Excel.'
+        });
       }
     }
 
 
     // --- 3. IMAGE EXTRACTION (OCR Tesseract) ---
-    else if (fileType === 'image') {
+    if (fileType === 'image') {
       const ocrResult = await Tesseract.recognize(filePath, 'eng', {
-        logger: m => console.log('Tesseract OCR status:', m.status, `${Math.round(m.progress * 100)}%`)
+        logger: m => console.log('Tesseract OCR status:', m.status, Math.round(m.progress * 100) + '%')
       });
       rawText = ocrResult.data.text;
 
       if (userGeminiKey) {
         try {
-          extractedTransactions = await extractTransactionsWithGemini(rawText, userGeminiKey);
+          extractedTransactions = await extractTransactionsWithGemini({ rawText }, userGeminiKey);
         } catch (e) {
           console.error('Gemini OCR extraction failed, using fallback regex:', e);
           extractedTransactions = parseTextTransactions(rawText);
@@ -398,6 +462,16 @@ router.post('/upload', authMiddleware, upload.single('statement'), async (req, r
     });
 
   } catch (err) {
+    // Uniform error handling – guarantees a proper JSON response even if `res` is unavailable
+    const sendError = (status, message, details) => {
+      if (res && typeof res.status === 'function') {
+        res.status(status).json({ error: message, details });
+      } else {
+        // Fallback to console error (Next.js will handle the 500 automatically)
+        console.error('Critical upload error (no response object):', message, details);
+      }
+    };
+
     console.error('Upload statement error:', err);
     // Cleanup file in case of error
     try {
@@ -406,12 +480,12 @@ router.post('/upload', authMiddleware, upload.single('statement'), async (req, r
       }
     } catch (e) {}
 
-    res.status(500).json({ error: 'Server error processing statement.' });
+    sendError(500, 'Server error processing statement.', err.message);
   }
 });
 
 // Gemini LLM Transaction Structuring
-const extractTransactionsWithGemini = async (rawText, apiKey) => {
+const extractTransactionsWithGemini = async (inputData, apiKey) => {
   // Initialize standard Gemini client (simulated or direct depending on Node package imports)
   // Let's implement a clean call to the generative SDK
   try {
@@ -419,8 +493,8 @@ const extractTransactionsWithGemini = async (rawText, apiKey) => {
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     
     const prompt = `
-      You are an expert financial OCR assistant. Below is the raw text extracted from a bank statement.
-      Analyze the text and extract all transactions as a valid JSON array. Each transaction object MUST contain these exact properties:
+      You are an expert financial OCR assistant. Below is a bank statement (either raw text or a file).
+      Analyze it and extract all transactions as a valid JSON array. Each transaction object MUST contain these exact properties:
       - date: in YYYY-MM-DD format
       - description: clean, readable description (e.g. rename "POS PURCHASE 8945 ABUJA" to "POS Purchase Abuja" or extract the merchant name)
       - amount: numerical value (absolute, positive float)
@@ -428,15 +502,22 @@ const extractTransactionsWithGemini = async (rawText, apiKey) => {
 
       Ignore balances, summary lines, and header details. If a row does not look like a complete transaction, skip it.
 
-      Raw Text:
-      """
-      ${rawText.substring(0, 15000)}
-      """
+      ${inputData.rawText ? `Raw Text:\n"""\n${inputData.rawText.substring(0, 15000)}\n"""` : ''}
 
       Return ONLY the raw JSON array of objects. Do not include markdown code block syntax (like \`\`\`json) or any explanations.
     `;
 
-    const result = await model.generateContent(prompt);
+    const contentArgs = [prompt];
+    if (inputData.fileBuffer && inputData.mimeType) {
+      contentArgs.push({
+        inlineData: {
+          data: inputData.fileBuffer.toString('base64'),
+          mimeType: inputData.mimeType
+        }
+      });
+    }
+
+    const result = await model.generateContent(contentArgs);
     let jsonText = result.response.text().trim();
     
     // Clean up code blocks if the LLM included them

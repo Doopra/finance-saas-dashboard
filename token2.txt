@@ -1,0 +1,2 @@
+◇ injected env (5) from .env.local // tip: ⌁ auth for agents [www.vestauth.com]
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjMsImlhdCI6MTc3OTczMjk2MSwiZXhwIjoxNzc5ODE5MzYxfQ.uTnapIIT04yx9T2bo85noaehOQ5YMvWAKhpvfaE-AFc

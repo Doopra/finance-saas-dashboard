@@ -1,0 +1,7 @@
+Date,Description,Amount,Type,Category
+2026-05-01,Transfer from Alice,150000,credit,Sales Income
+2026-05-02,Wholesale Purchase,85000,debit,Product Purchases
+2026-05-03,POS Deposit,200000,credit,Sales Income
+2026-05-04,AirTime Recharge,3000,debit,Miscellaneous Expenses
+2026-05-05,Invoice Payment,95000,credit,Miscellaneous Expenses
+2026-05-06,Office Supplies,12000,debit,Miscellaneous Expenses

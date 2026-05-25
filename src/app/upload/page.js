@@ -36,6 +36,9 @@ export default function UploadPage() {
   const [extractedData, setExtractedData] = useState(null);
   const [currencySymbol, setCurrencySymbol] = useState('₦');
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+
   const fetchHistory = async () => {
     try {
       const data = await api.get('/statements/history');
@@ -126,6 +129,7 @@ export default function UploadPage() {
 
       setSuccessMsg(`Successfully processed "${file.name}"! Extracted ${result.transactions.length} transactions.`);
       setExtractedData(result.transactions);
+      setCurrentPage(1);
       setFile(null);
       
       // Refresh history
@@ -149,6 +153,12 @@ export default function UploadPage() {
         return '⚪ Statement';
     }
   };
+
+  // Pagination Logic
+  const indexOfLastRow = currentPage * rowsPerPage;
+  const indexOfFirstRow = indexOfLastRow - rowsPerPage;
+  const currentRows = extractedData ? extractedData.slice(indexOfFirstRow, indexOfLastRow) : [];
+  const totalPages = extractedData ? Math.ceil(extractedData.length / rowsPerPage) : 0;
 
   return (
     <DashboardLayout title="Upload Statement">
@@ -286,6 +296,25 @@ export default function UploadPage() {
                   <h3 className="font-display font-bold text-base text-slate-900 dark:text-white">Extracted Transactions Preview</h3>
                   <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Audit extracted items from the statement</p>
                 </div>
+                
+                <div className="flex items-center gap-3 text-sm text-slate-600 dark:text-slate-400">
+                  <label htmlFor="rowsPerPage" className="font-medium text-xs uppercase tracking-wider">Rows per page:</label>
+                  <select
+                    id="rowsPerPage"
+                    value={rowsPerPage}
+                    onChange={(e) => {
+                      setRowsPerPage(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E1322] px-3 py-1.5 text-sm outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600/30 text-slate-900 dark:text-white"
+                  >
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -299,7 +328,7 @@ export default function UploadPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800/40 text-slate-700 dark:text-slate-350">
-                    {extractedData.map((tx, idx) => (
+                    {currentRows.map((tx, idx) => (
                       <tr key={idx} className="hover:bg-slate-50/30 dark:hover:bg-slate-800/10 transition-colors">
                         <td className="py-4 px-6 text-xs font-medium font-sans">{tx.date}</td>
                         <td className="py-4 px-6 text-sm font-semibold text-slate-900 dark:text-white truncate max-w-xs">{tx.description}</td>
@@ -321,6 +350,59 @@ export default function UploadPage() {
                   </tbody>
                 </table>
               </div>
+              
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800/60 px-6 py-4">
+                  <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+                    Showing <span className="font-bold text-slate-700 dark:text-slate-300">{indexOfFirstRow + 1}</span> to <span className="font-bold text-slate-700 dark:text-slate-300">{Math.min(indexOfLastRow, extractedData.length)}</span> of <span className="font-bold text-slate-700 dark:text-slate-300">{extractedData.length}</span> entries
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E1322] text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Previous
+                    </button>
+                    <div className="flex items-center gap-1">
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        let pageNum;
+                        if (totalPages <= 5) {
+                          pageNum = i + 1;
+                        } else if (currentPage <= 3) {
+                          pageNum = i + 1;
+                        } else if (currentPage >= totalPages - 2) {
+                          pageNum = totalPages - 4 + i;
+                        } else {
+                          pageNum = currentPage - 2 + i;
+                        }
+                        
+                        return (
+                          <button
+                            key={pageNum}
+                            onClick={() => setCurrentPage(pageNum)}
+                            className={`min-w-[28px] h-7 flex items-center justify-center rounded-md text-xs font-medium transition-colors ${
+                              currentPage === pageNum
+                                ? 'bg-blue-600 text-white'
+                                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            {pageNum}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                      disabled={currentPage === totalPages}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E1322] text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
 

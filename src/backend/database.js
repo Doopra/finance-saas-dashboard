@@ -17,7 +17,8 @@ function getTursoConfig() {
   if (!process.env.TURSO_DATABASE_URL) {
     throw new Error('TURSO_DATABASE_URL is missing');
   }
-  if (!process.env.TURSO_AUTH_TOKEN) {
+  const isLocal = process.env.TURSO_DATABASE_URL.startsWith('file:');
+  if (!isLocal && !process.env.TURSO_AUTH_TOKEN) {
     throw new Error('TURSO_AUTH_TOKEN is missing');
   }
   return {

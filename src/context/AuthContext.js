@@ -55,13 +55,6 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('token', data.token);
       setUser(data.user);
       
-      // AUTO-SEED DEMO DATA: Wow factor out-of-the-box!
-      try {
-        await api.post('/auth/seed', { userId: data.user.id });
-      } catch (seedErr) {
-        console.error('Failed to seed account:', seedErr);
-      }
-      
       router.push('/dashboard');
       return data.user;
     } catch (err) {
