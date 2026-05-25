@@ -1,15 +1,39 @@
 {
-  "name": "ai-financial-manager-root",
-  "version": "1.0.0",
-  "description": "Root orchestrator for modern AI Financial Management App",
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "setup": "npm run install:all && npm run dev",
-    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
-    "dev:backend": "npm run dev --prefix backend",
-    "dev:frontend": "npm run dev --prefix frontend",
-    "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\""
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
   },
   "dependencies": {
-    "concurrently": "^8.2.2"
+    "@google/generative-ai": "^0.24.1",
+    "bcryptjs": "^3.0.3",
+    "canvas-confetti": "^1.9.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "framer-motion": "^11.11.17",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "^0.359.0",
+    "multer": "^2.1.1",
+    "next": "14.2.15",
+    "pdf-parse": "^2.4.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "^2.12.7",
+    "serverless-http": "^4.0.0",
+    "sqlite3": "^6.0.1",
+    "tesseract.js": "^7.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.16",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.15",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.4.1"
   }
 }

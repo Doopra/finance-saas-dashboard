@@ -121,13 +121,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', database: 'connected', port: PORT });
 });
 
-// Bootstrap Database & Express
-db.initDB()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Backend Server listening at http://localhost:${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error('Critical database bootup error:', err);
-  });
+// Initialize database
+db.initDB().catch(console.error);
+
+module.exports = app;
